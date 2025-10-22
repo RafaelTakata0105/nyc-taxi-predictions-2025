@@ -1,0 +1,28 @@
+artifact_path: file:c:/Users/Rafa/apps/5to semestre/CdD/nyc-taxi-predictions-2025/notebooks/mlruns/2/models/m-6079e85a584d49b68098705573cefaaf/artifacts
+flavors:
+  python_function:
+    env:
+      conda: conda.yaml
+      virtualenv: python_env.yaml
+    loader_module: mlflow.sklearn
+    model_path: model.pkl
+    predict_fn: predict
+    python_version: 3.13.7
+  sklearn:
+    code: null
+    pickled_model: model.pkl
+    serialization_format: cloudpickle
+    sklearn_version: 1.7.2
+is_signature_from_type_hint: false
+mlflow_version: 3.4.0
+model_id: m-6079e85a584d49b68098705573cefaaf
+model_size_bytes: 4569855
+model_uuid: m-6079e85a584d49b68098705573cefaaf
+prompts: null
+run_id: 737459188e194edf82f55478187669bd
+signature:
+  inputs: '[{"type": "tensor", "tensor-spec": {"dtype": "float64", "shape": [-1, 4159]}}]'
+  outputs: '[{"type": "tensor", "tensor-spec": {"dtype": "float64", "shape": [-1]}}]'
+  params: null
+type_hint_from_example: false
+utc_time_created: '2025-10-17 02:39:14.779644'
