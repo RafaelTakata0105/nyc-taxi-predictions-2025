@@ -4,20 +4,29 @@ import optuna
 import pathlib
 import pickle
 import mlflow
-import pathlib
 import pandas as pd
 from dotenv import load_dotenv
 from optuna.samplers import TPESampler
 from mlflow.models.signature import infer_signature
-from mlflow.tracking import MlflowClient
+from mlflow.tracking import MlflowClient # Necesario para la gestión de alias
 from sklearn.metrics import root_mean_squared_error
 from sklearn.feature_extraction import DictVectorizer
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from prefect import flow, task
 
+# --- CONSTANTES ---
+# Nombre del modelo en Unity Catalog
+MODEL_REGISTRY_NAME = "workspace.default.nyc-taxi-model-prefect"
+EXPERIMENT_NAME = "/Users/rafaeltakata0105@gmail.com/nyc-taxi-experiment-prefect"
+
+# --------------------------
+# TAREAS DE INGESTA Y PRE-PROCESAMIENTO
+# --------------------------
+
 @task(name="Read Data")
 def read_data(file_path: str) -> pd.DataFrame:
     """Read data into DataFrame"""
+    # ... (código sin cambios)
     df = pd.read_parquet(file_path)
 
     df.lpep_dropoff_datetime = pd.to_datetime(df.lpep_dropoff_datetime)
@@ -36,10 +45,11 @@ def read_data(file_path: str) -> pd.DataFrame:
 @task(name="Add Features")
 def add_features(df_train: pd.DataFrame, df_val: pd.DataFrame):
     """Add features to the model"""
+    # ... (código sin cambios)
     df_train["PU_DO"] = df_train["PULocationID"] + "_" + df_train["DOLocationID"]
     df_val["PU_DO"] = df_val["PULocationID"] + "_" + df_val["DOLocationID"]
 
-    categorical = ["PU_DO"]  #'PULocationID', 'DOLocationID']
+    categorical = ["PU_DO"] 
     numerical = ["trip_distance"]
 
     dv = DictVectorizer()
@@ -54,13 +64,18 @@ def add_features(df_train: pd.DataFrame, df_val: pd.DataFrame):
     y_val = df_val["duration"].values
     return X_train, X_val, y_train, y_val, dv
 
+# --------------------------
+# TAREA DE HYPER-PARÁMETROS
+# --------------------------
+
 @task(name="Hyperparameter Tunning")
 def hyper_parameter_tunning(X_train, X_val, y_train, y_val, dv, model_obj):
     
     mlflow.sklearn.autolog()
     
-    # 1. Determinar el tipo de modelo y configurar la búsqueda (Study)
+    # CORRECCIÓN 1: Usar isinstance() para comparar tipos de objetos
     if isinstance(model_obj, RandomForestRegressor):
+        model_family = "random_forest_regressor"
         model_name = "Random Forest Regressor"
         
         def objective(trial: optuna.trial.Trial):
@@ -75,13 +90,13 @@ def hyper_parameter_tunning(X_train, X_val, y_train, y_val, dv, model_obj):
             }
 
             with mlflow.start_run(nested=True):
-                mlflow.set_tag("model_family", "random_forest_regressor")
+                mlflow.set_tag("model_family", model_family)
                 mlflow.log_params(params)
                 
-                model = model_obj.__class__(**params) # Usar __class__ para crear nueva instancia
+                model = model_obj.__class__(**params)
                 model.fit(X_train, y_train)
 
-                y_pred = model.predict(X_val) # CORREGIDO: Usar X_val para predecir
+                y_pred = model.predict(X_val)
                 rmse = root_mean_squared_error(y_val, y_pred)
                 mlflow.log_metric("rmse", rmse)
                 
@@ -90,6 +105,7 @@ def hyper_parameter_tunning(X_train, X_val, y_train, y_val, dv, model_obj):
             return rmse
 
     elif isinstance(model_obj, GradientBoostingRegressor):
+        model_family = "gradient_boosting_regressor"
         model_name = "Gradient Boosting Regressor"
 
         def objective(trial: optuna.trial.Trial):
@@ -105,47 +121,45 @@ def hyper_parameter_tunning(X_train, X_val, y_train, y_val, dv, model_obj):
             }
 
             with mlflow.start_run(nested=True):
-                mlflow.set_tag("model_family", "gradient_boosting_regressor")
+                mlflow.set_tag("model_family", model_family)
                 mlflow.log_params(params)
                 
-                model = model_obj.__class__(**params) # Usar __class__ para crear nueva instancia
+                model = model_obj.__class__(**params)
                 model.fit(X_train, y_train)
 
-                y_pred = model.predict(X_val) # CORREGIDO: Usar X_val para predecir
+                y_pred = model.predict(X_val)
                 rmse = root_mean_squared_error(y_val, y_pred)
                 mlflow.log_metric("rmse", rmse)
                 
                 signature = infer_signature(X_val, y_pred)
                 mlflow.sklearn.log_model(model, name="model", input_example=X_val[:5], signature=signature)
             return rmse
-
     else:
-        # Lanza un error si se pasa un modelo no soportado
         raise ValueError(f"Modelo no soportado para Optuna: {type(model_obj)}")
 
-    # 2. Ejecutar Optuna (Esta sección ahora siempre se alcanza después de definir 'objective')
+    # CORRECCIÓN 2: Ejecución fuera de la condición IF para solucionar UnboundLocalError
     sampler = TPESampler(seed=42)
-    study = optuna.create_study(direction="minimize", sampler=sampler) # Ahora 'study' está definida
+    study = optuna.create_study(direction="minimize", sampler=sampler)
     
     with mlflow.start_run(run_name=f"{model_name} Hyperparameter Optimization (Optuna)", nested=True):
         study.optimize(objective, n_trials=3)
 
-    # 3. Recuperar y retornar los mejores hiperparámetros
     best_params = study.best_params
     
-    # Manejar campos fijos para los modelos de sklearn
     if "max_depth" in best_params:
         best_params["max_depth"] = int(best_params["max_depth"])
     
-    # El parámetro 'objective' y 'seed' no es necesario en Scikit-learn como lo era en XGBoost.
-    # Simplemente mantenemos la semilla si el modelo la soporta.
     best_params["random_state"] = 42
 
     return best_params
 
+# --------------------------
+# TAREA DE ENTRENAMIENTO FINAL
+# --------------------------
+
 @task(name="Train Best Model")
-def train_best_model(X_train, X_val, y_train, y_val, dv, best_params, model_obj) -> None:
-    """train a model with best hyperparams and write everything out"""
+def train_best_model(X_train, X_val, y_train, y_val, dv, best_params, model_obj): # Se eliminó -> None
+    """train a model with best hyperparams and writes artifacts to MLflow, returning the run_id."""
 
     if isinstance(model_obj, GradientBoostingRegressor):
         model_family = "Gradient Boosting Regressor"
@@ -154,7 +168,8 @@ def train_best_model(X_train, X_val, y_train, y_val, dv, best_params, model_obj)
     else:
         raise ValueError("Modelo no reconocido.")
 
-    with mlflow.start_run(run_name=f"{model_family} Final Model"):
+    # El run final se abre y se cierra en el bloque 'with', permitiendo capturar el run_id.
+    with mlflow.start_run(run_name=f"{model_family} Final Model") as run:
         mlflow.log_params(best_params)
 
         mlflow.set_tags({
@@ -165,7 +180,7 @@ def train_best_model(X_train, X_val, y_train, y_val, dv, best_params, model_obj)
         })
 
         # Entrenar el modelo FINAL
-        model = model_obj.__class__(**best_params) # Usar __class__
+        model = model_obj.__class__(**best_params)
         model.fit(X_train, y_train)
 
         # Evaluar y registrar la métrica final
@@ -190,36 +205,40 @@ def train_best_model(X_train, X_val, y_train, y_val, dv, best_params, model_obj)
             input_example=input_example,
             signature=signature,
         )
-    return None
-
-@task(name= "Model Registry")
-def save_best_metric_model(experiment_name:str)-> None:
-    #Get Run uri of best result:
-    runs = mlflow.search_runs(
-        experiment_names=[experiment_name],
-        order_by=["metrics.rmse ASC"],
-        output_format="list") 
     
-    if len(runs) > 0:
-        best_run = runs[0]
-        model_uri_full = f"runs:/{best_run.info.run_id}/model"
-        result = mlflow.register_model(
-            model_uri=model_uri_full,
-            name="workspace.default.nyc-taxi-model-prefect")
-    return None
+    # Retornar el ID del run para el registro en Unity Catalog
+    return run.info.run_id
+
+# --------------------------
+# TAREA DE REGISTRO DE VERSIÓN
+# --------------------------
+
+@task(name= "Register Model Version")
+def register_model_version(run_id: str, model_name: str) -> None:
+    """Registra la versión del modelo en Unity Catalog usando el run_id."""
+    model_uri_full = f"runs:/{run_id}/model"
+    
+    # Se registra el modelo como una nueva versión en Unity Catalog
+    mlflow.register_model(
+        model_uri=model_uri_full,
+        name=model_name)
+    print(f"✅ Modelo registrado como nueva versión de '{model_name}' usando run ID: {run_id}")
+
+# --------------------------
+# TAREA DE CHAMPION/CHALLENGER (NUEVA LÓGICA)
+# --------------------------
 
 @task(name="Manage Model Aliases")
 def manage_model_alias(model_name: str) -> None:
-    """Compara todas las versiones registradas del modelo y asigna los alias Champion/Challenger."""
     client = MlflowClient()
     
     # 1. Obtener todas las versiones del modelo registrado en Unity Catalog
     try:
-        # Nota: Unity Catalog usa el nombre del modelo como un namespace
-        all_versions = client.search_model_versions(f"name='{model_name}'")
+        # CORRECCIÓN: Usar el parámetro filter_string y asegurarse de que la función se llama correctamente.
+        all_versions = client.search_model_versions(filter_string=f"name='{model_name}'")
     except Exception as e:
-        print(f"ERROR: No se pudo encontrar el modelo '{model_name}' en el registro. Ejecute el flujo al menos dos veces. Error: {e}")
-        return
+        # ... (resto del manejo de errores)
+        print(f"ERROR: No se pudo encontrar el modelo '{model_name}' en el registro. Error: {e}")
 
     scored_versions = []
     
@@ -252,22 +271,33 @@ def manage_model_alias(model_name: str) -> None:
 
     # 3. Ordenar por RMSE (ascendente: el más bajo es el mejor)
     scored_versions.sort(key=lambda x: x["rmse"])
-    
+
     champion = scored_versions[0]
     challenger = scored_versions[1]
     
-    for version in scored_versions:
-        if "Champion" in version["aliases"]:
-            client.delete_model_version_alias(name=model_name, alias="Champion")
-        if "Challenger" in version["aliases"]:
-            client.delete_model_version_alias(name=model_name, alias="Challenger")
-    
-    client.set_model_version_alias(name=model_name, alias="Champion", version=champion["version"])
-    client.set_model_version_alias(name=model_name, alias="Challenger", version=challenger["version"])
-    
+    print(f"🏅 Asignando CHAMPION: Versión {champion['version']}...")
+    # CAMBIO CLAVE AQUÍ: set_registered_model_alias
+    client.set_registered_model_alias(
+        name=model_name, 
+        alias="Champion", 
+        version=champion["version"]
+    )
+
+    print(f"🚀 Asignando CHALLENGER: Versión {challenger['version']}...")
+    # CAMBIO CLAVE AQUÍ: set_registered_model_alias
+    client.set_registered_model_alias(
+        name=model_name, 
+        alias="Challenger", 
+        version=challenger["version"]
+    )
+
     print(f"Champion y Challenger asignados exitosamente.")
 
+# --------------------------
+# FLUJO PRINCIPAL
+# --------------------------
 
+@flow(name="Main Flow")
 def main_flow(year: int, month_train: str, month_val: str) -> None:
     """The main training pipeline for competitive model selection."""
     
