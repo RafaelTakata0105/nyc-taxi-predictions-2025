@@ -7,15 +7,12 @@ import os
 import mlflow
 import pandas as pd
 
-load_dotenv(override=True)  
+load_dotenv(override=True) 
 
 mlflow.set_tracking_uri("databricks")
 client = MlflowClient()
 
-EXPERIMENT_NAME = "/Users/oscar.josue2204@gmail.com/nyc-taxi-experiment-prefect"
-
-for exp in client.list_experiments():
-    print(exp.name)
+EXPERIMENT_NAME = "/Users/rafaeltakata0105@gmail.com/nyc-taxi-experiment-prefect"
 
 run_ = mlflow.search_runs(order_by=['metrics.rmse ASC'],
                           output_format="list",
